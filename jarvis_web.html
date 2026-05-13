@@ -441,6 +441,7 @@ const SAMPLE_IN  = 8000;    // mic rate sent to server
 const SAMPLE_OUT = 22050;   // server audio rate
 const CHUNK_SEND = 2048;    // float32 samples per WS send (matches py: 4×512)
 const BARS       = 64;      // spectrum bar count
+const BROWSER_OPEN_AUDIO_GRACE_MS = 450; // let playback buffer before Chrome startup work
 
 // ── Mic sensitivity (mirrors py constants) ───────────────────────
 const MIC_ENERGY_THRESHOLD = 600;
@@ -829,10 +830,11 @@ function enqueueAudio(b64) {
   isPlaying = true;
   pushState();
 
-  // flush pending URLs on first audio chunk of a response
+  // Flush pending URLs shortly after playback starts. A small grace period
+  // lets the Web Audio queue build before Chrome launch work competes for CPU.
   if (pendingUrls.length > 0) {
     const batch = pendingUrls.splice(0);
-    setTimeout(() => openPendingUrls(batch), 0);
+    setTimeout(() => openPendingUrls(batch), BROWSER_OPEN_AUDIO_GRACE_MS);
   }
 
   src.onended = () => {

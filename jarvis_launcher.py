@@ -12,7 +12,7 @@ Requirements:
     pip install sounddevice numpy speechrecognition
 """
 
-import os, sys, time, threading, subprocess, tempfile, json, webbrowser
+import os, sys, time, threading, subprocess, tempfile, json, webbrowser, queue
 import ctypes, ctypes.wintypes
 import platform as _plat
 
@@ -39,6 +39,14 @@ _url_slot      = 0
 _url_slot_wins = {}
 _url_slot_modes = {}
 _slot_profiles = {}
+_url_slot_lock = threading.RLock()
+
+# Chrome process startup/teardown can briefly starve realtime Web Audio.
+# Keep browser work serialized and paced instead of spawning all slots at once.
+BROWSER_LAUNCH_STAGGER_SEC = 0.45
+BROWSER_CLOSE_STAGGER_SEC = 0.15
+_browser_action_queue = queue.Queue()
+_browser_action_worker_started = False
 
 # ── APP REGISTRY ──────────────────────────────────────────────────────────────
 _IS_MAC = _plat.system() == "Darwin"
@@ -201,13 +209,14 @@ def open_url_in_slot(url, slot, tab=None):
         x, y = _slot_pos(slot)
     profile = _ensure_profile(slot)
 
-    old = _url_slot_wins.get(slot)
-    if old:
-        try: old.terminate()
-        except Exception: pass
-        time.sleep(0.2)
-        _url_slot_wins[slot] = None
-        _url_slot_modes.pop(slot, None)
+    with _url_slot_lock:
+        old = _url_slot_wins.get(slot)
+        if old:
+            try: old.terminate()
+            except Exception: pass
+            time.sleep(0.2)
+            _url_slot_wins[slot] = None
+            _url_slot_modes.pop(slot, None)
 
     if chrome:
         args = [
@@ -229,21 +238,75 @@ def open_url_in_slot(url, slot, tab=None):
                 # it silently blocks WebSocket connections on Chrome 120+
             ])
         proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        _url_slot_wins[slot] = proc
-        _url_slot_modes[slot] = "manual" if not _should_auto_close_tab(tab) else "auto"
+        with _url_slot_lock:
+            _url_slot_wins[slot] = proc
+            _url_slot_modes[slot] = "manual" if not _should_auto_close_tab(tab) else "auto"
     else:
         webbrowser.open_new(url)
 
 def close_all_url_windows(auto=False):
     global _url_slot_wins, _url_slot_modes
-    for slot, proc in list(_url_slot_wins.items()):
-        if auto and _url_slot_modes.get(slot) == "manual":
-            continue
+    with _url_slot_lock:
+        items = list(_url_slot_wins.items())
+    for slot, proc in items:
+        with _url_slot_lock:
+            if auto and _url_slot_modes.get(slot) == "manual":
+                continue
+            _url_slot_wins.pop(slot, None)
+            _url_slot_modes.pop(slot, None)
         if proc:
             try: proc.terminate()
             except Exception: pass
-        _url_slot_wins.pop(slot, None)
-        _url_slot_modes.pop(slot, None)
+        # Stagger teardown too; killing several Chrome profiles at once can
+        # contend with Web Audio just like launching them.
+        time.sleep(BROWSER_CLOSE_STAGGER_SEC)
+
+def _run_browser_action(action, payload):
+    global _url_slot
+    if action == "open_tabs":
+        tabs = payload or []
+        close_all_url_windows()
+        for i, tab in enumerate(tabs[:4]):
+            url  = tab.get("url", tab) if isinstance(tab, dict) else str(tab)
+            slot = i % 4
+            open_url_in_slot(url, slot, tab)
+            # Avoid simultaneous Chrome launches so realtime playback keeps
+            # enough CPU/main-thread headroom to stay smooth.
+            if i < len(tabs[:4]) - 1:
+                time.sleep(BROWSER_LAUNCH_STAGGER_SEC)
+        _url_slot = len(tabs) % 4
+        print(f"  [tab] ✅ Opened {len(tabs[:4])} tab(s) in grid slots")
+    elif action == "close_tabs":
+        close_all_url_windows(auto=bool(payload))
+        if payload:
+            print("  [tab] ✅ Auto-closed grid slot windows")
+        else:
+            print("  [tab] ✅ All slot windows closed")
+
+def _browser_action_worker():
+    while True:
+        action, payload = _browser_action_queue.get()
+        try:
+            _run_browser_action(action, payload)
+        except Exception as e:
+            print(f"  [tab] ⚠  browser action error: {e}")
+        finally:
+            _browser_action_queue.task_done()
+
+def _ensure_browser_action_worker():
+    global _browser_action_worker_started
+    if _browser_action_worker_started:
+        return
+    _browser_action_worker_started = True
+    threading.Thread(
+        target=_browser_action_worker,
+        daemon=True,
+        name="browser-action-queue",
+    ).start()
+
+def enqueue_browser_action(action, payload=None):
+    _ensure_browser_action_worker()
+    _browser_action_queue.put((action, payload))
 
 # ── JARVIS WINDOWS ────────────────────────────────────────────────────────────
 _visual_proc = None
@@ -433,18 +496,8 @@ def start_http_server():
             elif self.path == "/open_tabs":
                 try:
                     tabs = json.loads(body) if body else []
-                    close_all_url_windows()
-                    global _url_slot
-                    threads = []
-                    for i, tab in enumerate(tabs[:4]):
-                        url   = tab.get("url", tab) if isinstance(tab, dict) else str(tab)
-                        slot  = i % 4
-                        t     = threading.Thread(target=open_url_in_slot, args=(url, slot, tab), daemon=True)
-                        threads.append(t)
-                        t.start()
-                    _url_slot = len(tabs) % 4
-                    for t in threads: t.join(timeout=0)  # fire-and-forget
-                    print(f"  [tab] ✅ Opened {len(tabs[:4])} tab(s) in grid slots")
+                    enqueue_browser_action("open_tabs", tabs)
+                    print(f"  [tab] ↻ Queued {len(tabs[:4])} tab(s) for paced opening")
                 except Exception as e:
                     print(f"  [tab] ⚠  open_tabs error: {e}")
                 self.send_response(200)
@@ -459,11 +512,7 @@ def start_http_server():
                 except Exception:
                     payload = {}
                 auto = bool(payload.get("auto")) if isinstance(payload, dict) else False
-                close_all_url_windows(auto=auto)
-                if auto:
-                    print("  [tab] ✅ Auto-closed grid slot windows")
-                else:
-                    print("  [tab] ✅ All slot windows closed")
+                enqueue_browser_action("close_tabs", auto)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self._cors()
