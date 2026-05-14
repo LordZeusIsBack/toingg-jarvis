@@ -39,6 +39,7 @@ _url_slot      = 0
 _url_slot_wins = {}
 _url_slot_modes = {}
 _slot_profiles = {}
+_url_slot_lock = threading.RLock()
 
 # ── APP REGISTRY ──────────────────────────────────────────────────────────────
 _IS_MAC = _plat.system() == "Darwin"
@@ -201,13 +202,14 @@ def open_url_in_slot(url, slot, tab=None):
         x, y = _slot_pos(slot)
     profile = _ensure_profile(slot)
 
-    old = _url_slot_wins.get(slot)
-    if old:
-        try: old.terminate()
-        except Exception: pass
-        time.sleep(0.2)
-        _url_slot_wins[slot] = None
-        _url_slot_modes.pop(slot, None)
+    with _url_slot_lock:
+        old = _url_slot_wins.get(slot)
+        if old:
+            try: old.terminate()
+            except Exception: pass
+            time.sleep(0.2)
+            _url_slot_wins[slot] = None
+            _url_slot_modes.pop(slot, None)
 
     if chrome:
         args = [
@@ -229,21 +231,25 @@ def open_url_in_slot(url, slot, tab=None):
                 # it silently blocks WebSocket connections on Chrome 120+
             ])
         proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        _url_slot_wins[slot] = proc
-        _url_slot_modes[slot] = "manual" if not _should_auto_close_tab(tab) else "auto"
+        with _url_slot_lock:
+            _url_slot_wins[slot] = proc
+            _url_slot_modes[slot] = 'manual' if not _should_auto_close_tab(tab) else 'auto'
     else:
         webbrowser.open_new(url)
 
 def close_all_url_windows(auto=False):
     global _url_slot_wins, _url_slot_modes
-    for slot, proc in list(_url_slot_wins.items()):
-        if auto and _url_slot_modes.get(slot) == "manual":
-            continue
+    with _url_slot_lock:
+        items = list(_url_slot_wins.items())
+    for slot, proc in items:
+        with _url_slot_lock:
+            if auto and _url_slot_modes.get(slot) == 'manual':
+                continue
+            _url_slot_wins.pop(slot, None)
+            _url_slot_modes.pop(slot, None)
         if proc:
             try: proc.terminate()
             except Exception: pass
-        _url_slot_wins.pop(slot, None)
-        _url_slot_modes.pop(slot, None)
 
 # ── JARVIS WINDOWS ────────────────────────────────────────────────────────────
 _visual_proc = None
