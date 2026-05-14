@@ -240,7 +240,7 @@ def open_url_in_slot(url, slot, tab=None):
         proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         with _url_slot_lock:
             _url_slot_wins[slot] = proc
-            _url_slot_modes[slot] = "manual" if not _should_auto_close_tab(tab) else "auto"
+            _url_slot_modes[slot] = 'manual' if not _should_auto_close_tab(tab) else 'auto'
     else:
         webbrowser.open_new(url)
 
@@ -250,7 +250,7 @@ def close_all_url_windows(auto=False):
         items = list(_url_slot_wins.items())
     for slot, proc in items:
         with _url_slot_lock:
-            if auto and _url_slot_modes.get(slot) == "manual":
+            if auto and _url_slot_modes.get(slot) == 'manual':
                 continue
             _url_slot_wins.pop(slot, None)
             _url_slot_modes.pop(slot, None)
@@ -497,7 +497,7 @@ def start_http_server():
                 try:
                     tabs = json.loads(body) if body else []
                     enqueue_browser_action("open_tabs", tabs)
-                    print(f"  [tab] ↻ Queued {len(tabs[:4])} tab(s) for paced opening")
+                    print(f"  [tab] Queued {len(tabs[:4])} tab(s) for paced opening")
                 except Exception as e:
                     print(f"  [tab] ⚠  open_tabs error: {e}")
                 self.send_response(200)
