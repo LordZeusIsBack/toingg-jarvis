@@ -12,7 +12,7 @@ Requirements:
     pip install sounddevice numpy speechrecognition
 """
 
-import os, sys, time, threading, subprocess, tempfile, json, webbrowser
+import os, sys, time, threading, subprocess, tempfile, json, webbrowser, queue
 import ctypes, ctypes.wintypes
 import platform as _plat
 
@@ -40,6 +40,13 @@ _url_slot_wins = {}
 _url_slot_modes = {}
 _slot_profiles = {}
 _url_slot_lock = threading.RLock()
+
+# Chrome process startup/teardown can briefly starve realtime Web Audio.
+# Keep browser work serialized and paced instead of spawning all slots at once.
+BROWSER_LAUNCH_STAGGER_SEC = 0.45
+BROWSER_CLOSE_STAGGER_SEC = 0.15
+_browser_action_queue = queue.Queue()
+_browser_action_worker_started = False
 
 # ── APP REGISTRY ──────────────────────────────────────────────────────────────
 _IS_MAC = _plat.system() == "Darwin"
@@ -250,6 +257,56 @@ def close_all_url_windows(auto=False):
         if proc:
             try: proc.terminate()
             except Exception: pass
+        # Stagger teardown too; killing several Chrome profiles at once can
+        # contend with Web Audio just like launching them.
+        time.sleep(BROWSER_CLOSE_STAGGER_SEC)
+
+def _run_browser_action(action, payload):
+    global _url_slot
+    if action == "open_tabs":
+        tabs = payload or []
+        close_all_url_windows()
+        for i, tab in enumerate(tabs[:4]):
+            url  = tab.get("url", tab) if isinstance(tab, dict) else str(tab)
+            slot = i % 4
+            open_url_in_slot(url, slot, tab)
+            # Avoid simultaneous Chrome launches so realtime playback keeps
+            # enough CPU/main-thread headroom to stay smooth.
+            if i < len(tabs[:4]) - 1:
+                time.sleep(BROWSER_LAUNCH_STAGGER_SEC)
+        _url_slot = len(tabs) % 4
+        print(f"  [tab] ✅ Opened {len(tabs[:4])} tab(s) in grid slots")
+    elif action == "close_tabs":
+        close_all_url_windows(auto=bool(payload))
+        if payload:
+            print("  [tab] ✅ Auto-closed grid slot windows")
+        else:
+            print("  [tab] ✅ All slot windows closed")
+
+def _browser_action_worker():
+    while True:
+        action, payload = _browser_action_queue.get()
+        try:
+            _run_browser_action(action, payload)
+        except Exception as e:
+            print(f"  [tab] ⚠  browser action error: {e}")
+        finally:
+            _browser_action_queue.task_done()
+
+def _ensure_browser_action_worker():
+    global _browser_action_worker_started
+    if _browser_action_worker_started:
+        return
+    _browser_action_worker_started = True
+    threading.Thread(
+        target=_browser_action_worker,
+        daemon=True,
+        name="browser-action-queue",
+    ).start()
+
+def enqueue_browser_action(action, payload=None):
+    _ensure_browser_action_worker()
+    _browser_action_queue.put((action, payload))
 
 # ── JARVIS WINDOWS ────────────────────────────────────────────────────────────
 _visual_proc = None
