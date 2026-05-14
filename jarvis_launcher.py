@@ -496,18 +496,8 @@ def start_http_server():
             elif self.path == "/open_tabs":
                 try:
                     tabs = json.loads(body) if body else []
-                    close_all_url_windows()
-                    global _url_slot
-                    threads = []
-                    for i, tab in enumerate(tabs[:4]):
-                        url   = tab.get("url", tab) if isinstance(tab, dict) else str(tab)
-                        slot  = i % 4
-                        t     = threading.Thread(target=open_url_in_slot, args=(url, slot, tab), daemon=True)
-                        threads.append(t)
-                        t.start()
-                    _url_slot = len(tabs) % 4
-                    for t in threads: t.join(timeout=0)  # fire-and-forget
-                    print(f"  [tab] ✅ Opened {len(tabs[:4])} tab(s) in grid slots")
+                    enqueue_browser_action("open_tabs", tabs)
+                    print(f"  [tab] Queued {len(tabs[:4])} tab(s) for paced opening")
                 except Exception as e:
                     print(f"  [tab] ⚠  open_tabs error: {e}")
                 self.send_response(200)
@@ -522,11 +512,7 @@ def start_http_server():
                 except Exception:
                     payload = {}
                 auto = bool(payload.get("auto")) if isinstance(payload, dict) else False
-                close_all_url_windows(auto=auto)
-                if auto:
-                    print("  [tab] ✅ Auto-closed grid slot windows")
-                else:
-                    print("  [tab] ✅ All slot windows closed")
+                enqueue_browser_action("close_tabs", auto)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self._cors()
